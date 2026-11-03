@@ -5,8 +5,8 @@ A menu bar app for this Mac that keeps several Claude Code logins and switches b
 - Lists every Claude account you have signed in to, with plan (Pro, Max 5x, Max 20x, …), subscription
   status, organisation, extra usage, and the 5-hour and weekly usage with reset times. The menu bar
   shows the active account's 5-hour usage.
-- **Switch** points Claude Code at another account. New `claude` sessions use it; open sessions keep the
-  old one until restarted.
+- **Switch** points Claude Code at another account. New sessions use it at once; running sessions pick it
+  up within about 30 seconds (they re-read the login from the keychain).
 - **Add Account…** opens Terminal on `claude auth login`. The account you were on stays saved, and the new
   one appears in the list within 30 seconds.
 - **Main account** (star): Claude Code uses it whenever it has usage left. When the active account hits
