@@ -35,6 +35,8 @@ final class AppModel: ObservableObject {
     private var notifiedLimit: Set<String> = []
     private let policy = AutoSwitchPolicy()
     private var lastAutoSwitch: Date?
+    private var loginProcess: Process?
+    private var loginInput: Pipe?
 
     /// Logins are picked up within this time; usage is fetched less often.
     static let syncInterval: Duration = .seconds(30)
@@ -134,20 +136,44 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Saves the current login, then opens Terminal on `claude auth login`. The new
-    /// account is picked up on the next sync once the sign-in finishes.
+    /// Saves the current login, then runs `claude auth login` in the background (no Terminal): it
+    /// opens the browser and catches the sign-in on a local port. Gives up after 5 minutes.
     func addAccount() {
+        guard loginProcess == nil else { message = "Sign-in is already open in your browser."; return }
         Task {
             _ = try? await manager.syncActive()
             await pull()
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            p.arguments = ["-lc", "exec claude auth login"]
+            let input = Pipe() // kept open and never written, so the paste-code prompt just waits
+            p.standardInput = input
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            p.terminationHandler = { [weak self] proc in
+                Task { @MainActor in await self?.loginFinished(status: proc.terminationStatus) }
+            }
             do {
-                let url = try Self.writeLoginScript()
-                NSWorkspace.shared.open(url)
-                message = "Sign in to the new account in Terminal. It shows up here within 30 seconds."
+                try p.run()
+                loginProcess = p
+                loginInput = input
+                message = "Finish signing in in your browser. The account shows up here when done."
+                Task { [weak p] in
+                    try? await Task.sleep(for: .seconds(300))
+                    if let p, p.isRunning { p.terminate() }
+                }
             } catch {
-                message = "Could not open Terminal: \(error.localizedDescription)"
+                message = "Could not start sign-in: \(error.localizedDescription)"
             }
         }
+    }
+
+    private func loginFinished(status: Int32) async {
+        loginProcess = nil
+        loginInput = nil
+        _ = try? await manager.syncActive()
+        await refresh()
+        message = status == 0 ? "Signed in." : "Sign-in did not finish. Try Add Account again."
     }
 
     func setOpensAtLogin(_ on: Bool) {
@@ -226,25 +252,6 @@ final class AppModel: ObservableObject {
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
             NSWorkspace.shared.open(url)
         } catch {}
-    }
-
-    static func writeLoginScript() throws -> URL {
-        let dir = ManagerPaths.live.store.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent("Add Claude Account.command")
-        let script = """
-        #!/bin/zsh -l
-        echo "Sign in to the Claude account you want to add."
-        echo "The account you use now stays saved in Claude Accounts."
-        echo
-        claude auth login
-        echo
-        echo "Done. Claude Accounts picks this account up within 30 seconds. You can close this window."
-
-        """
-        try script.write(to: url, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
-        return url
     }
 }
 

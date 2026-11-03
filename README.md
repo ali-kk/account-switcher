@@ -7,7 +7,7 @@ A menu bar app for this Mac that keeps several Claude Code logins and switches b
   shows the active account's 5-hour usage.
 - **Switch** points Claude Code at another account. New sessions use it at once; running sessions pick it
   up within about 30 seconds (they re-read the login from the keychain).
-- **Add Account…** opens Terminal on `claude auth login`. The account you were on stays saved, and the new
+- **Add Account…** runs `claude auth login` in the background (no Terminal window): the browser opens, and the sign-in is caught on a local port. The account you were on stays saved, and the new
   one appears in the list within 30 seconds.
 - **Main account** (star): Claude Code uses it whenever it has usage left. When the active account hits
   a limit the app switches to the least-used account with room, and goes back to the main account as
