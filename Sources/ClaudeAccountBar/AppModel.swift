@@ -51,6 +51,7 @@ final class AppModel: ObservableObject {
 
     func start() {
         enableLoginItemOnFirstRun()
+        if resumeAtReset, !keepsSessionsGoing { setKeepsSessionsGoing(true) }
         guard loop == nil else { return }
         loop = Task { [weak self] in
             var lastUsage = Date.distantPast
