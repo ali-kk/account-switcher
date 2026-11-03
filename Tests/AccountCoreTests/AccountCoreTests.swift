@@ -397,22 +397,56 @@ let policy = AutoSwitchPolicy()
 
 // MARK: Session resume
 
-@Test func resumesOnlySessionsThatExitedAndQuotesTheDirectory() throws {
-    let a = LiveSession(pid: 1, sessionId: "59bc3091-c97d-47a3-b9a7-b46cacf844e8", cwd: "/tmp/it's here")
-    let b = LiveSession(pid: 2, sessionId: "f10fa790-aa05-4b50-aa39-28fe40f4d3ba", cwd: "/tmp/b")
-    #expect(SessionResume.toResume(snapshot: [a, b], isAlive: { $0 == 2 }) == [a])
-    let s = try #require(SessionResume.script(for: a))
-    #expect(s.contains("cd '/tmp/it'\\''s here'"))
-    #expect(s.contains("claude --resume 59bc3091-c97d-47a3-b9a7-b46cacf844e8 \"continue\""))
-    #expect(SessionResume.script(for: LiveSession(pid: 3, sessionId: "x; rm -rf ~", cwd: "/")) == nil)
+private func entry(_ type: String, error: Bool = false, text: String = "hi", cwd: String = "/w") -> String {
+    #"{"type":"\#(type)","isApiErrorMessage":\#(error),"cwd":"\#(cwd)","message":{"content":[{"type":"text","text":"\#(text)"}]}}"#
 }
 
-@Test func readsLiveInteractiveSessions() throws {
+@Test func detectsASessionStoppedByTheLimitEvenWithTrailingSystemEntries() throws {
+    let id = "59bc3091-c97d-47a3-b9a7-b46cacf844e8"
+    let limit = entry("assistant", error: true, text: "You've hit your 5-hour limit · resets 7:30am")
+    let tail = "cut-off garbage\n" + entry("user") + "\n" + limit + "\n" + #"{"type":"system","subtype":"away_summary"}"# + "\n"
+    #expect(SessionResume.limitStopped(tail: Data(tail.utf8), id: id) == SessionRef(sessionId: id, cwd: "/w"))
+    // The user carried on after the limit message: not stopped any more.
+    #expect(SessionResume.limitStopped(tail: Data((limit + "\n" + entry("user")).utf8), id: id) == nil)
+    // Another API error is not a usage limit.
+    #expect(SessionResume.limitStopped(tail: Data(entry("assistant", error: true, text: "Overloaded").utf8), id: id) == nil)
+}
+
+@Test func findsOnlyRecentNotRunningLimitStoppedTranscripts() throws {
     let env = try Env()
-    let ok = #"{"pid":7,"sessionId":"59bc3091-c97d-47a3-b9a7-b46cacf844e8","cwd":"/w","kind":"interactive"}"#
-    let bg = #"{"pid":8,"sessionId":"f10fa790-aa05-4b50-aa39-28fe40f4d3ba","cwd":"/w","kind":"background"}"#
-    try ok.write(to: env.dir.appendingPathComponent("7.json"), atomically: true, encoding: .utf8)
-    try bg.write(to: env.dir.appendingPathComponent("8.json"), atomically: true, encoding: .utf8)
-    let live = SessionResume.liveSessions(in: env.dir, isAlive: { _ in true })
-    #expect(live.map(\.pid) == [7])
+    let proj = env.dir.appendingPathComponent("p/-w")
+    try FileManager.default.createDirectory(at: proj, withIntermediateDirectories: true)
+    let limit = entry("assistant", error: true, text: "You've hit your session limit")
+    let a = "59bc3091-c97d-47a3-b9a7-b46cacf844e8", b = "f10fa790-aa05-4b50-aa39-28fe40f4d3ba", c = "11111111-1111-1111-1111-111111111111"
+    for id in [a, b] { try limit.write(to: proj.appendingPathComponent("\(id).jsonl"), atomically: true, encoding: .utf8) }
+    try entry("user").write(to: proj.appendingPathComponent("\(c).jsonl"), atomically: true, encoding: .utf8)
+    let root = env.dir.appendingPathComponent("p")
+    let got = SessionResume.stoppedAtLimit(since: Date().addingTimeInterval(-60), projects: root, live: [b])
+    #expect(got.map(\.sessionId) == [a])
+    #expect(SessionResume.stoppedAtLimit(since: Date().addingTimeInterval(60), projects: root, live: []).isEmpty)
+}
+
+@Test func reopenScriptQuotesTheDirectoryAndRejectsBadIds() throws {
+    let s = try #require(SessionResume.script(for: SessionRef(sessionId: "59bc3091-c97d-47a3-b9a7-b46cacf844e8", cwd: "/tmp/it's here")))
+    #expect(s.contains("cd '/tmp/it'\\''s here'"))
+    #expect(s.contains("claude --resume 59bc3091-c97d-47a3-b9a7-b46cacf844e8 \"continue\""))
+    #expect(SessionResume.script(for: SessionRef(sessionId: "x; rm -rf ~", cwd: "/")) == nil)
+}
+
+@Test func readsRunningSessionIDs() throws {
+    let env = try Env()
+    try #"{"pid":7,"sessionId":"aaa","cwd":"/w"}"#.write(to: env.dir.appendingPathComponent("7.json"), atomically: true, encoding: .utf8)
+    try #"{"pid":8,"sessionId":"bbb","cwd":"/w"}"#.write(to: env.dir.appendingPathComponent("8.json"), atomically: true, encoding: .utf8)
+    #expect(SessionResume.liveSessionIDs(in: env.dir, isAlive: { $0 == 7 }) == ["aaa"])
+}
+
+@Test func singleAccountIsCheckedAtResetAndSleepLandsJustAfterIt() {
+    let a = record("A", five: 100, resets: "2026-11-03T15:40:00+00:00")           // resets at 15:40
+    let before = parseISODate("2026-11-03T15:39:50+00:00")!, after = parseISODate("2026-11-03T15:40:05+00:00")!
+    #expect(!policy.activeMayBeBack(a, now: before))
+    #expect(policy.activeMayBeBack(a, now: after))
+    #expect(policy.nextDelay(active: a, now: before) == 12)                         // 10 s + 2 s margin
+    #expect(policy.nextDelay(active: a, now: after) == 30)                          // already past: normal pace
+    let ok = record("A", five: 10)
+    #expect(!policy.activeMayBeBack(ok, now: after) && policy.nextDelay(active: ok, now: before) == 30)
 }

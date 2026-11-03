@@ -36,4 +36,17 @@ public struct AutoSwitchPolicy: Sendable {
         guard let main, main.id != activeID, let u = main.usage, u.isLimited else { return false }
         return (u.limitResetsAt ?? .distantFuture) <= now
     }
+
+    /// The active account is limited and its limit should have reset: check it every sync
+    /// until the server says it has room, instead of waiting for the 3-minute usage poll.
+    public func activeMayBeBack(_ active: AccountRecord?, now: Date) -> Bool {
+        guard let u = active?.usage, u.isLimited else { return false }
+        return (u.limitResetsAt ?? .distantFuture) <= now
+    }
+
+    /// How long the sync loop sleeps: normally `base`, shortened to land just after a reset.
+    public func nextDelay(active: AccountRecord?, now: Date, base: TimeInterval = 30) -> TimeInterval {
+        guard let u = active?.usage, u.isLimited, let at = u.limitResetsAt, at > now else { return base }
+        return min(base, max(1, at.timeIntervalSince(now) + 2))
+    }
 }

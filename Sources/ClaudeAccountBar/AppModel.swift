@@ -39,7 +39,6 @@ final class AppModel: ObservableObject {
     private var loginInput: Pipe?
 
     /// Logins are picked up within this time; usage is fetched less often.
-    static let syncInterval: Duration = .seconds(30)
     static let usageInterval: TimeInterval = 180
 
     init() {
@@ -73,10 +72,15 @@ final class AppModel: ObservableObject {
                     if let main, self.policy.mainMayBeBack(main: main, activeID: self.activeID, now: Date()) {
                         await self.manager.refresh(id: main.id)
                     }
+                    if let a = self.active, self.policy.activeMayBeBack(a, now: Date()) {
+                        await self.manager.refresh(id: a.id)
+                    }
                     await self.pull()
                     self.checkLimit()
                 }
-                try? await Task.sleep(for: Self.syncInterval)
+                // Normally every 30 s; shortened so a reset is noticed within seconds.
+                let delay = self.policy.nextDelay(active: self.active, now: Date(), base: 30)
+                try? await Task.sleep(for: .seconds(delay))
             }
         }
     }
@@ -224,28 +228,34 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// While the active account is limited, remember which sessions were running. Once it has room
-    /// again, reopen the ones that exited meanwhile. Survives an app restart (kept in UserDefaults).
+    /// Notes when the active account first hits a limit. Once it has room again, reopens the sessions
+    /// that the limit stopped (not ones closed on purpose, not ones still running). Survives an app
+    /// restart (the time is kept in UserDefaults).
     private func trackSessions(_ a: AccountRecord) {
         guard resumeAtReset, let limited = a.usage?.isLimited else { return }
-        let key = "limitSnapshot"
-        let saved = (UserDefaults.standard.data(forKey: key)).flatMap { try? JSONDecoder().decode([LiveSession].self, from: $0) } ?? []
+        let key = "limitSeenAt"
+        let seen = UserDefaults.standard.object(forKey: key) as? Date
         if limited {
-            // Keep adding: sessions started or still open during the limit window are all candidates.
-            let merged = Dictionary((saved + SessionResume.liveSessions()).map { ($0.sessionId, $0) }, uniquingKeysWith: { _, new in new })
-            UserDefaults.standard.set(try? JSONEncoder().encode(Array(merged.values)), forKey: key)
-        } else if !saved.isEmpty {
+            if seen == nil { UserDefaults.standard.set(Date(), forKey: key) }
+        } else if let seen {
             UserDefaults.standard.removeObject(forKey: key)
-            let gone = SessionResume.toResume(snapshot: saved)
-            for s in gone { Self.reopen(s) }
-            if !gone.isEmpty { message = "Limit reset; reopened \(gone.count) session\(gone.count == 1 ? "" : "s")." }
+            // Sessions stop a little before the app notices the limit, hence the margin.
+            let stopped = SessionResume.stoppedAtLimit(since: seen.addingTimeInterval(-20 * 60), live: SessionResume.liveSessionIDs())
+            let shown = Array(stopped.prefix(Self.maxReopen))
+            for s in shown { Self.reopen(s) }
+            guard !shown.isEmpty else { return }
+            message = "Limit reset; reopened \(shown.count) session\(shown.count == 1 ? "" : "s")."
+            if notifyAtLimit { Notifier.resumed(reopened: shown.count, skipped: stopped.count - shown.count) }
         }
     }
 
-    private static func reopen(_ s: LiveSession) {
+    /// One Terminal window per session; more than this would flood the screen.
+    static let maxReopen = 6
+
+    private static func reopen(_ s: SessionRef) {
         guard let script = SessionResume.script(for: s) else { return }
-        let dir = ManagerPaths.live.store.deletingLastPathComponent()
-        let url = dir.appendingPathComponent("Resume \(s.sessionId).command")
+        let dir = ManagerPaths.live.store.deletingLastPathComponent().appendingPathComponent("resume")
+        let url = dir.appendingPathComponent("\(s.sessionId).command")
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try script.write(to: url, atomically: true, encoding: .utf8)
@@ -275,6 +285,15 @@ enum Notifier {
             : ". New Claude Code sessions use it; restart open ones.")
         content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "switched-\(to.id)", content: content, trigger: nil))
+    }
+
+    static func resumed(reopened: Int, skipped: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = "Claude limit reset"
+        content.body = "Reopened \(reopened) stopped session\(reopened == 1 ? "" : "s") in Terminal."
+            + (skipped > 0 ? " \(skipped) more were not reopened." : "")
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "resumed", content: content, trigger: nil))
     }
 
     static func limitReached(account: AccountRecord, alternative: AccountRecord?) {
