@@ -241,16 +241,18 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.removeObject(forKey: key)
             // Sessions stop a little before the app notices the limit, hence the margin.
             let stopped = SessionResume.stoppedAtLimit(since: seen.addingTimeInterval(-20 * 60), live: SessionResume.liveSessionIDs())
-            let shown = Array(stopped.prefix(Self.maxReopen))
-            for s in shown { Self.reopen(s) }
-            guard !shown.isEmpty else { return }
-            message = "Limit reset; reopened \(shown.count) session\(shown.count == 1 ? "" : "s")."
-            if notifyAtLimit { Notifier.resumed(reopened: shown.count, skipped: stopped.count - shown.count) }
+            guard !stopped.isEmpty else { return }
+            message = "Limit reset; reopening \(stopped.count) session\(stopped.count == 1 ? "" : "s")."
+            if notifyAtLimit { Notifier.resumed(reopened: stopped.count) }
+            // One Terminal window each, a moment apart so a big batch does not choke Terminal.
+            Task {
+                for s in stopped {
+                    Self.reopen(s)
+                    try? await Task.sleep(for: .milliseconds(600))
+                }
+            }
         }
     }
-
-    /// One Terminal window per session; more than this would flood the screen.
-    static let maxReopen = 6
 
     private static func reopen(_ s: SessionRef) {
         guard let script = SessionResume.script(for: s) else { return }
@@ -287,11 +289,10 @@ enum Notifier {
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "switched-\(to.id)", content: content, trigger: nil))
     }
 
-    static func resumed(reopened: Int, skipped: Int) {
+    static func resumed(reopened: Int) {
         let content = UNMutableNotificationContent()
         content.title = "Claude limit reset"
-        content.body = "Reopened \(reopened) stopped session\(reopened == 1 ? "" : "s") in Terminal."
-            + (skipped > 0 ? " \(skipped) more were not reopened." : "")
+        content.body = "Reopening \(reopened) stopped session\(reopened == 1 ? "" : "s") in Terminal."
         content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "resumed", content: content, trigger: nil))
     }

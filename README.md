@@ -19,7 +19,7 @@ A menu bar app for this Mac that keeps several Claude Code logins and switches b
   carries on by itself. (Taken from Claude Code 2.1.317's code; Claude Code may change it.)
 - **Resume at reset** (Settings, on by default; works with a single account): the app notes when the active
   account hits a limit and, within seconds of the reset, reopens the sessions the limit stopped, in Terminal
-  with `claude --resume <id> "continue"` (at most 6, with a notification). A session counts as stopped by the
+  with `claude --resume <id> "continue"` (all of them, a Terminal window each, with a notification). A session counts as stopped by the
   limit when its transcript (`~/.claude/projects/*/<id>.jsonl`) ends in the "You've hit your …" error, so
   sessions you closed yourself or that are still running are left alone. Running sessions carry on by
   themselves via "Keep sessions going" (turned on with this setting).
