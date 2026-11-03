@@ -394,3 +394,25 @@ let policy = AutoSwitchPolicy()
     r.fullName = "Ali"; #expect(r.title == "Ali")
     r.displayName = "Ali M"; #expect(r.title == "Ali M")
 }
+
+// MARK: Session resume
+
+@Test func resumesOnlySessionsThatExitedAndQuotesTheDirectory() throws {
+    let a = LiveSession(pid: 1, sessionId: "59bc3091-c97d-47a3-b9a7-b46cacf844e8", cwd: "/tmp/it's here")
+    let b = LiveSession(pid: 2, sessionId: "f10fa790-aa05-4b50-aa39-28fe40f4d3ba", cwd: "/tmp/b")
+    #expect(SessionResume.toResume(snapshot: [a, b], isAlive: { $0 == 2 }) == [a])
+    let s = try #require(SessionResume.script(for: a))
+    #expect(s.contains("cd '/tmp/it'\\''s here'"))
+    #expect(s.contains("claude --resume 59bc3091-c97d-47a3-b9a7-b46cacf844e8 \"continue\""))
+    #expect(SessionResume.script(for: LiveSession(pid: 3, sessionId: "x; rm -rf ~", cwd: "/")) == nil)
+}
+
+@Test func readsLiveInteractiveSessions() throws {
+    let env = try Env()
+    let ok = #"{"pid":7,"sessionId":"59bc3091-c97d-47a3-b9a7-b46cacf844e8","cwd":"/w","kind":"interactive"}"#
+    let bg = #"{"pid":8,"sessionId":"f10fa790-aa05-4b50-aa39-28fe40f4d3ba","cwd":"/w","kind":"background"}"#
+    try ok.write(to: env.dir.appendingPathComponent("7.json"), atomically: true, encoding: .utf8)
+    try bg.write(to: env.dir.appendingPathComponent("8.json"), atomically: true, encoding: .utf8)
+    let live = SessionResume.liveSessions(in: env.dir, isAlive: { _ in true })
+    #expect(live.map(\.pid) == [7])
+}

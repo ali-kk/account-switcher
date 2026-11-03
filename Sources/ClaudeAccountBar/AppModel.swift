@@ -18,6 +18,13 @@ final class AppModel: ObservableObject {
     @Published var autoSwitch: Bool {
         didSet { UserDefaults.standard.set(autoSwitch, forKey: "autoSwitch") }
     }
+    /// Reopens sessions that stopped at a limit once it resets (works with a single account).
+    @Published var resumeAtReset: Bool {
+        didSet {
+            UserDefaults.standard.set(resumeAtReset, forKey: "resumeAtReset")
+            if resumeAtReset, !keepsSessionsGoing { setKeepsSessionsGoing(true) }
+        }
+    }
     @Published private(set) var opensAtLogin = SMAppService.mainApp.status == .enabled
     /// The account Claude Code goes back to whenever it has usage left.
     @Published private(set) var mainID: String? = UserDefaults.standard.string(forKey: "mainAccountID")
@@ -34,9 +41,10 @@ final class AppModel: ObservableObject {
     static let usageInterval: TimeInterval = 180
 
     init() {
-        UserDefaults.standard.register(defaults: ["notifyAtLimit": true, "autoSwitch": true])
+        UserDefaults.standard.register(defaults: ["notifyAtLimit": true, "autoSwitch": true, "resumeAtReset": true])
         notifyAtLimit = UserDefaults.standard.bool(forKey: "notifyAtLimit")
         autoSwitch = UserDefaults.standard.bool(forKey: "autoSwitch")
+        resumeAtReset = UserDefaults.standard.bool(forKey: "resumeAtReset")
     }
 
     var active: AccountRecord? { records.first { $0.id == activeID } }
@@ -169,6 +177,7 @@ final class AppModel: ObservableObject {
     /// one with room) when automatic switching is on; otherwise notifies once per limit hit.
     private func checkLimit() {
         guard let a = active else { return }
+        trackSessions(a)
         if a.usage?.isLimited != true { notifiedLimit.remove(a.id) }
         Task {
             if autoSwitch, switchingID == nil,
@@ -186,6 +195,36 @@ final class AppModel: ObservableObject {
             notifiedLimit.insert(a.id)
             Notifier.limitReached(account: a, alternative: await manager.bestAlternative(to: a.id))
         }
+    }
+
+    /// While the active account is limited, remember which sessions were running. Once it has room
+    /// again, reopen the ones that exited meanwhile. Survives an app restart (kept in UserDefaults).
+    private func trackSessions(_ a: AccountRecord) {
+        guard resumeAtReset, let limited = a.usage?.isLimited else { return }
+        let key = "limitSnapshot"
+        let saved = (UserDefaults.standard.data(forKey: key)).flatMap { try? JSONDecoder().decode([LiveSession].self, from: $0) } ?? []
+        if limited {
+            // Keep adding: sessions started or still open during the limit window are all candidates.
+            let merged = Dictionary((saved + SessionResume.liveSessions()).map { ($0.sessionId, $0) }, uniquingKeysWith: { _, new in new })
+            UserDefaults.standard.set(try? JSONEncoder().encode(Array(merged.values)), forKey: key)
+        } else if !saved.isEmpty {
+            UserDefaults.standard.removeObject(forKey: key)
+            let gone = SessionResume.toResume(snapshot: saved)
+            for s in gone { Self.reopen(s) }
+            if !gone.isEmpty { message = "Limit reset; reopened \(gone.count) session\(gone.count == 1 ? "" : "s")." }
+        }
+    }
+
+    private static func reopen(_ s: LiveSession) {
+        guard let script = SessionResume.script(for: s) else { return }
+        let dir = ManagerPaths.live.store.deletingLastPathComponent()
+        let url = dir.appendingPathComponent("Resume \(s.sessionId).command")
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+            NSWorkspace.shared.open(url)
+        } catch {}
     }
 
     static func writeLoginScript() throws -> URL {

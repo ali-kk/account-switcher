@@ -17,6 +17,10 @@ A menu bar app for this Mac that keeps several Claude Code logins and switches b
   hits a limit then waits instead of stopping and probes every minute; sessions re-read the login from
   the keychain every 30 s, so after a switch the next probe goes out on the new account and the turn
   carries on by itself. (Taken from Claude Code 2.1.317's code; Claude Code may change it.)
+- **Resume at reset** (Settings, on by default; works with a single account): while the active account is
+  limited the app remembers the running sessions (`~/.claude/sessions`). When the limit resets, sessions that
+  exited meanwhile are reopened in Terminal with `claude --resume <id> "continue"`; sessions still running
+  carry on by themselves via "Keep sessions going" (turned on with this setting).
 - Notifications when the app switches, or when nothing has room left.
 - Opens at login (Login Items, via `SMAppService`); turn it off in the menu.
 

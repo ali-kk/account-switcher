@@ -113,6 +113,9 @@ struct MenuView: View {
                     SettingRow(title: "Keep sessions going", detail: "Running sessions wait at a limit and continue on the new account",
                                isOn: Binding(get: { model.keepsSessionsGoing }, set: { model.setKeepsSessionsGoing($0) }))
                     Divider().overlay(Theme.border)
+                    SettingRow(title: "Resume at reset", detail: "Reopen sessions that stopped at a limit when it resets, even with one account",
+                               isOn: $model.resumeAtReset)
+                    Divider().overlay(Theme.border)
                     SettingRow(title: "Notifications", detail: "When an account hits its limit or the app switches",
                                isOn: $model.notifyAtLimit)
                     Divider().overlay(Theme.border)
