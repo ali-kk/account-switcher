@@ -285,3 +285,112 @@ func twoAccounts(_ env: Env) async throws -> AccountManager {
     #expect(await m.records.map(\.id) == ["B"])
     #expect(try env.secrets.read(service: AccountManager.storeService, account: "A") == nil)
 }
+
+// MARK: Automatic switching
+
+func record(_ id: String, five: Double, week: Double = 0, resets: String = "2026-11-03T15:40:00+00:00") -> AccountRecord {
+    var r = AccountRecord(id: id, addedAt: fixedNow)
+    r.usage = Usage(five_hour: .init(utilization: five, resets_at: resets),
+                    seven_day: .init(utilization: week, resets_at: "2026-11-07T11:00:00+00:00"),
+                    seven_day_opus: nil, seven_day_sonnet: nil, extra_usage: nil, limits: nil)
+    return r
+}
+
+let policy = AutoSwitchPolicy()
+
+@Test func limitedAccountMovesToLeastUsedWithRoom() {
+    let a = record("A", five: 100), b = record("B", five: 60), c = record("C", five: 20)
+    #expect(policy.target(active: a, accounts: [a, b, c], mainID: nil, lastSwitch: nil, now: fixedNow)?.id == "C")
+    let weekly = record("A", five: 10, week: 100)
+    #expect(policy.target(active: weekly, accounts: [weekly, b], mainID: nil, lastSwitch: nil, now: fixedNow)?.id == "B")
+}
+
+@Test func staysWhenNotLimitedOrNoRoomElsewhere() {
+    let a = record("A", five: 99), b = record("B", five: 0)
+    #expect(policy.target(active: a, accounts: [a, b], mainID: nil, lastSwitch: nil, now: fixedNow) == nil)
+    let full = record("A", five: 100), alsoFull = record("B", five: 100)
+    #expect(policy.target(active: full, accounts: [full, alsoFull], mainID: nil, lastSwitch: nil, now: fixedNow) == nil)
+    #expect(policy.target(active: nil, accounts: [b], mainID: nil, lastSwitch: nil, now: fixedNow) == nil)
+}
+
+@Test func signedOutOrUnmeasuredAccountsAreNotTargets() {
+    let a = record("A", five: 100)
+    var out = record("B", five: 0); out.needsLogin = true
+    let unknown = AccountRecord(id: "C", addedAt: fixedNow)
+    #expect(policy.target(active: a, accounts: [a, out, unknown], mainID: nil, lastSwitch: nil, now: fixedNow) == nil)
+}
+
+@Test func mainAccountIsPreferredWheneverItHasRoom() {
+    let main = record("M", five: 70), a = record("A", five: 100), b = record("B", five: 5)
+    // Limited: main wins even though B is less used.
+    #expect(policy.target(active: a, accounts: [main, a, b], mainID: "M", lastSwitch: nil, now: fixedNow)?.id == "M")
+    // Not limited, but main has room again: go back to main.
+    #expect(policy.target(active: b, accounts: [main, a, b], mainID: "M", lastSwitch: nil, now: fixedNow)?.id == "M")
+    // Already on main: stay.
+    #expect(policy.target(active: main, accounts: [main, a, b], mainID: "M", lastSwitch: nil, now: fixedNow) == nil)
+}
+
+@Test func limitedMainFallsBackToOthersThenComesBack() {
+    var main = record("M", five: 100), b = record("B", five: 10)
+    #expect(policy.target(active: main, accounts: [main, b], mainID: "M", lastSwitch: nil, now: fixedNow)?.id == "B")
+    #expect(policy.target(active: b, accounts: [main, b], mainID: "M", lastSwitch: nil, now: fixedNow) == nil)
+    main = record("M", five: 0)   // its window reset
+    #expect(policy.target(active: b, accounts: [main, b], mainID: "M", lastSwitch: nil, now: fixedNow)?.id == "M")
+}
+
+@Test func cooldownHoldsSwitches() {
+    let a = record("A", five: 100), b = record("B", five: 0)
+    #expect(policy.target(active: a, accounts: [a, b], mainID: nil, lastSwitch: fixedNow.addingTimeInterval(-60), now: fixedNow) == nil)
+    #expect(policy.target(active: a, accounts: [a, b], mainID: nil, lastSwitch: fixedNow.addingTimeInterval(-policy.cooldown - 1), now: fixedNow)?.id == "B")
+}
+
+@Test func closeWatchAndMainReturnChecks() {
+    #expect(policy.needsCloseWatch(record("A", five: 92)))
+    #expect(!policy.needsCloseWatch(record("A", five: 50)))
+    #expect(!policy.needsCloseWatch(nil))
+    let resetPassed = record("M", five: 100, resets: "2020-01-01T00:00:00+00:00")
+    let resetAhead = record("M", five: 100, resets: "2099-01-01T00:00:00+00:00")
+    #expect(policy.mainMayBeBack(main: resetPassed, activeID: "B", now: fixedNow))
+    #expect(!policy.mainMayBeBack(main: resetAhead, activeID: "B", now: fixedNow))
+    #expect(!policy.mainMayBeBack(main: resetPassed, activeID: "M", now: fixedNow))
+}
+
+// MARK: Claude Code settings
+
+@Test func keepSessionsGoingAddsAndRemovesOnlyItsKeys() throws {
+    let env = try Env()
+    let url = env.dir.appendingPathComponent("settings.json")
+    try JSONValue.object(["model": .string("opus"), "env": .object(["FOO": .string("1")])]).data().write(to: url)
+    #expect(!ClaudeSettings.keepsSessionsGoing(at: url))
+    try ClaudeSettings.setKeepSessionsGoing(true, at: url)
+    #expect(ClaudeSettings.keepsSessionsGoing(at: url))
+    var v = try JSONValue.parse(Data(contentsOf: url))
+    #expect(v["model"] == .string("opus") && v["env"]?["FOO"] == .string("1"))
+    try ClaudeSettings.setKeepSessionsGoing(false, at: url)
+    v = try JSONValue.parse(Data(contentsOf: url))
+    #expect(v["autoContinueAtUsageLimit"] == nil && v["env"] == .object(["FOO": .string("1")]))
+}
+
+@Test func keepSessionsGoingLeavesAnUpToDateFileUntouched() throws {
+    let env = try Env()
+    let url = env.dir.appendingPathComponent("settings.json")
+    let original = #"{"zeta":1,"autoContinueAtUsageLimit":true,"env":{"CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS":"60000"}}"#
+    try Data(original.utf8).write(to: url)
+    try ClaudeSettings.setKeepSessionsGoing(true, at: url)
+    #expect(String(decoding: try Data(contentsOf: url), as: UTF8.self) == original)
+}
+
+@Test func keepSessionsGoingCreatesMissingFile() throws {
+    let env = try Env()
+    let url = env.dir.appendingPathComponent("new/settings.json")
+    try ClaudeSettings.setKeepSessionsGoing(true, at: url)
+    #expect(ClaudeSettings.keepsSessionsGoing(at: url))
+}
+
+@Test func titleSkipsPlaceholderNames() {
+    var r = AccountRecord(id: "x", addedAt: fixedNow)
+    r.email = "dev@x.com"
+    r.displayName = "a"; #expect(r.title == "dev@x.com")
+    r.fullName = "Ali"; #expect(r.title == "Ali")
+    r.displayName = "Ali M"; #expect(r.title == "Ali M")
+}

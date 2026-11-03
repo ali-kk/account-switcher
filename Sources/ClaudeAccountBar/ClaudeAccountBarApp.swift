@@ -21,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     let model = AppModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
+            Task { await Snapshot.write(model: model, to: CommandLine.arguments[i + 1]); exit(0) }
+            return
+        }
         Notifier.setUp(delegate: self)
         model.start()
     }

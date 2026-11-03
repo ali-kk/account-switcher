@@ -149,7 +149,13 @@ public struct AccountRecord: Codable, Equatable, Identifiable, Sendable {
 
     public init(id: String, addedAt: Date) { self.id = id; self.addedAt = addedAt }
 
-    public var title: String { displayName ?? fullName ?? email ?? id }
+    /// Display name, unless it is a placeholder like "a"; then full name or email.
+    public var title: String {
+        for name in [displayName, fullName] {
+            if let n = name?.trimmingCharacters(in: .whitespaces), n.count >= 2 { return n }
+        }
+        return email ?? displayName ?? id
+    }
 
     /// "Max 5x", "Max 20x", "Pro", "Team", …
     public var planName: String {

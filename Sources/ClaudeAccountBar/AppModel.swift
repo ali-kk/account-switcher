@@ -15,19 +15,28 @@ final class AppModel: ObservableObject {
     @Published var notifyAtLimit: Bool {
         didSet { UserDefaults.standard.set(notifyAtLimit, forKey: "notifyAtLimit") }
     }
+    @Published var autoSwitch: Bool {
+        didSet { UserDefaults.standard.set(autoSwitch, forKey: "autoSwitch") }
+    }
     @Published private(set) var opensAtLogin = SMAppService.mainApp.status == .enabled
+    /// The account Claude Code goes back to whenever it has usage left.
+    @Published private(set) var mainID: String? = UserDefaults.standard.string(forKey: "mainAccountID")
+    @Published private(set) var keepsSessionsGoing = ClaudeSettings.keepsSessionsGoing(at: ClaudeSettings.liveURL)
 
     let manager = AccountManager()
     private var loop: Task<Void, Never>?
     private var notifiedLimit: Set<String> = []
+    private let policy = AutoSwitchPolicy()
+    private var lastAutoSwitch: Date?
 
     /// Logins are picked up within this time; usage is fetched less often.
     static let syncInterval: Duration = .seconds(30)
     static let usageInterval: TimeInterval = 180
 
     init() {
-        UserDefaults.standard.register(defaults: ["notifyAtLimit": true])
+        UserDefaults.standard.register(defaults: ["notifyAtLimit": true, "autoSwitch": true])
         notifyAtLimit = UserDefaults.standard.bool(forKey: "notifyAtLimit")
+        autoSwitch = UserDefaults.standard.bool(forKey: "autoSwitch")
     }
 
     var active: AccountRecord? { records.first { $0.id == activeID } }
@@ -44,7 +53,17 @@ final class AppModel: ObservableObject {
                     lastUsage = Date()
                 } else {
                     _ = try? await self.manager.syncActive()
+                    // Close to the limit: check the active account every sync so the switch is quick.
+                    if let id = await self.manager.activeID, self.policy.needsCloseWatch(self.records.first { $0.id == id }) {
+                        await self.manager.refresh(id: id)
+                    }
+                    // The main account's limit should have reset: check it so we go back promptly.
+                    let main = self.records.first { $0.id == self.mainID }
+                    if let main, self.policy.mainMayBeBack(main: main, activeID: self.activeID, now: Date()) {
+                        await self.manager.refresh(id: main.id)
+                    }
                     await self.pull()
+                    self.checkLimit()
                 }
                 try? await Task.sleep(for: Self.syncInterval)
             }
@@ -76,7 +95,9 @@ final class AppModel: ObservableObject {
             await manager.refresh(id: id)
             await pull()
             let name = active?.title ?? "the account"
-            message = "Switched to \(name). New Claude Code sessions use it; restart open ones."
+            message = keepsSessionsGoing
+                ? "Switched to \(name). Running sessions pick it up within about 30 seconds."
+                : "Switched to \(name). New Claude Code sessions use it; restart open ones."
         } catch {
             await pull()
             message = error.localizedDescription
@@ -84,7 +105,20 @@ final class AppModel: ObservableObject {
         checkLimit()
     }
 
+    func setMain(_ id: String?) {
+        mainID = id
+        UserDefaults.standard.set(id, forKey: "mainAccountID")
+        checkLimit()
+    }
+
+    func setKeepsSessionsGoing(_ on: Bool) {
+        do { try ClaudeSettings.setKeepSessionsGoing(on, at: ClaudeSettings.liveURL) }
+        catch { message = "Could not update Claude Code settings: \(error.localizedDescription)" }
+        keepsSessionsGoing = ClaudeSettings.keepsSessionsGoing(at: ClaudeSettings.liveURL)
+    }
+
     func remove(_ id: String) {
+        if id == mainID { setMain(nil) }
         Task {
             do { try await manager.remove(id) } catch { message = error.localizedDescription }
             await pull()
@@ -131,15 +165,26 @@ final class AppModel: ObservableObject {
         setOpensAtLogin(true)
     }
 
-    /// One notification per limit hit, offering the least-used account that still has room.
+    /// Puts Claude Code on the right account (main when it has room, otherwise the least-used
+    /// one with room) when automatic switching is on; otherwise notifies once per limit hit.
     private func checkLimit() {
         guard let a = active else { return }
-        guard a.usage?.isLimited == true else { notifiedLimit.remove(a.id); return }
-        guard notifyAtLimit, !notifiedLimit.contains(a.id) else { return }
-        notifiedLimit.insert(a.id)
+        if a.usage?.isLimited != true { notifiedLimit.remove(a.id) }
         Task {
-            let alt = await manager.bestAlternative(to: a.id)
-            Notifier.limitReached(account: a, alternative: alt)
+            if autoSwitch, switchingID == nil,
+               let target = policy.target(active: a, accounts: records, mainID: mainID, lastSwitch: lastAutoSwitch, now: Date()) {
+                lastAutoSwitch = Date()
+                await switchTo(target.id)
+                if activeID == target.id {
+                    let why = a.usage?.isLimited == true ? "\(a.title) hit its limit" : "\(target.title) is your main account and has usage again"
+                    message = "\(why); switched to \(target.title)."
+                    if notifyAtLimit { Notifier.switched(from: a, to: target, reason: why, sessionsContinue: keepsSessionsGoing) }
+                    return
+                }
+            }
+            guard a.usage?.isLimited == true, notifyAtLimit, !notifiedLimit.contains(a.id) else { return }
+            notifiedLimit.insert(a.id)
+            Notifier.limitReached(account: a, alternative: await manager.bestAlternative(to: a.id))
         }
     }
 
@@ -173,6 +218,16 @@ enum Notifier {
         let action = UNNotificationAction(identifier: switchAction, title: "Switch", options: [])
         c.setNotificationCategories([UNNotificationCategory(identifier: category, actions: [action], intentIdentifiers: [])])
         c.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    static func switched(from: AccountRecord, to: AccountRecord, reason: String, sessionsContinue: Bool) {
+        let content = UNMutableNotificationContent()
+        content.title = "Switched to \(to.title)"
+        content.body = reason + (sessionsContinue
+            ? ". Sessions waiting at the limit carry on within about a minute."
+            : ". New Claude Code sessions use it; restart open ones.")
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "switched-\(to.id)", content: content, trigger: nil))
     }
 
     static func limitReached(account: AccountRecord, alternative: AccountRecord?) {

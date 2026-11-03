@@ -9,8 +9,15 @@ A menu bar app for this Mac that keeps several Claude Code logins and switches b
   old one until restarted.
 - **Add Account…** opens Terminal on `claude auth login`. The account you were on stays saved, and the new
   one appears in the list within 30 seconds.
-- When the active account reaches a limit, a notification names the least-used account with room left and
-  offers a **Switch** button. You choose; the app does not switch on its own.
+- **Main account** (star): Claude Code uses it whenever it has usage left. When the active account hits
+  a limit the app switches to the least-used account with room, and goes back to the main account as
+  soon as its limit resets. (Settings → Switch automatically; 3-minute cooldown between switches.)
+- **Keep sessions going** sets `autoContinueAtUsageLimit` and
+  `CLAUDE_CODE_RETRY_WATCHDOG_USAGE_LIMIT_RECHECK_MS=60000` in `~/.claude/settings.json`. A session that
+  hits a limit then waits instead of stopping and probes every minute; sessions re-read the login from
+  the keychain every 30 s, so after a switch the next probe goes out on the new account and the turn
+  carries on by itself. (Taken from Claude Code 2.1.317's code; Claude Code may change it.)
+- Notifications when the app switches, or when nothing has room left.
 - Opens at login (Login Items, via `SMAppService`); turn it off in the menu.
 
 ## How it works
@@ -31,13 +38,12 @@ MCP server logins in `mcpOAuth`) and the account details in `oauthAccount` in `~
   prompts and a rebuilt app keeps working. Account details (no tokens) are in
   `~/Library/Application Support/ClaudeAccountBar/accounts.json`.
 
-Caveat: a session still running on account A after you switch to B renews A's tokens and may write them back
-into Claude Code's keychain item, which flips Claude Code back to A. Restart open sessions after a switch.
 
 ## Build, test, install
 
 ```sh
 swift test                  # core logic tests (fake keychain and API)
+"$HOME/Applications/Claude Accounts.app/Contents/MacOS/ClaudeAccountBar" --snapshot <dir>   # light.png/dark.png of the menu
 scripts/build-app.sh        # build, sign ad hoc, install in ~/Applications and start
 ```
 
