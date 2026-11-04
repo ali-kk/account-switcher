@@ -14,16 +14,17 @@ public struct AutoSwitchPolicy: Sendable {
 
     public init() {}
 
-    /// The account to switch to, or nil to stay.
+    /// The account to switch to, or nil to stay. `assumeLimited`: a running session reported the limit
+    /// even though the usage numbers (possibly stale) do not.
     public func target(active: AccountRecord?, accounts: [AccountRecord], mainID: String?,
-                       lastSwitch: Date?, now: Date) -> AccountRecord? {
+                       lastSwitch: Date?, now: Date, assumeLimited: Bool = false) -> AccountRecord? {
         guard let active else { return nil }
         if let lastSwitch, now.timeIntervalSince(lastSwitch) < cooldown { return nil }
         func hasRoom(_ r: AccountRecord) -> Bool {
             r.id != active.id && !r.needsLogin && r.usage != nil && !(r.usage?.isLimited ?? true)
         }
         if let main = accounts.first(where: { $0.id == mainID }), hasRoom(main) { return main }
-        guard active.usage?.isLimited == true else { return nil }
+        guard active.usage?.isLimited == true || assumeLimited else { return nil }
         return accounts.filter(hasRoom).min { $0.usage!.pressure < $1.usage!.pressure }
     }
 

@@ -26,6 +26,13 @@ A menu bar app for this Mac that keeps several Claude Code logins and switches b
 - Notifications when the app switches, or when nothing has room left.
 - Opens at login (Login Items, via `SMAppService`); turn it off in the menu.
 
+## Troubleshooting
+
+`~/Library/Logs/ClaudeAccountBar.log` records (no tokens) every switch, every "limited but no switch"
+(cooldown / no account with room), a session reporting a limit while the usage numbers disagree, an expired
+active login that could not be queried, a keychain call that timed out, and a switch that a running session
+undid. Read it first when the app does not switch.
+
 ## How it works
 
 Claude Code keeps its login in the keychain item `Claude Code-credentials` (`claudeAiOauth`, next to the

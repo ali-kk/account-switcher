@@ -134,7 +134,10 @@ public actor AccountManager {
     public func refresh(id: String) async {
         do {
             let token = try await usableAccessToken(id)
-            guard let token else { return } // active login expired: Claude Code renews it itself
+            guard let token else { // active login expired: Claude Code renews it itself
+                Diag.log("usage skipped for \(records.first { $0.id == id }?.title ?? id): active login expired, waiting for Claude Code to renew it")
+                return
+            }
             let usage: Usage
             do {
                 usage = try await api.usage(accessToken: token)

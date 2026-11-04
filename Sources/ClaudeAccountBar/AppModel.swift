@@ -35,11 +35,15 @@ final class AppModel: ObservableObject {
     private var notifiedLimit: Set<String> = []
     private let policy = AutoSwitchPolicy()
     private var lastAutoSwitch: Date?
+    /// Any switch, manual or automatic: limit errors older than this belong to the previous account.
+    private var lastSwitchAt = Date()
     private var loginProcess: Process?
     private var loginInput: Pipe?
 
     /// Logins are picked up within this time; usage is fetched less often.
     static let usageInterval: TimeInterval = 180
+    /// The active account is the one that hits limits, so it is polled more often.
+    static let activeInterval: TimeInterval = 60
 
     init() {
         UserDefaults.standard.register(defaults: ["notifyAtLimit": true, "autoSwitch": true, "resumeAtReset": true])
@@ -56,16 +60,22 @@ final class AppModel: ObservableObject {
         guard loop == nil else { return }
         loop = Task { [weak self] in
             var lastUsage = Date.distantPast
+            var lastActive = Date.distantPast
             while !Task.isCancelled {
                 guard let self else { return }
                 if Date().timeIntervalSince(lastUsage) >= Self.usageInterval {
                     await self.refresh()
                     lastUsage = Date()
+                    lastActive = Date()
                 } else {
                     _ = try? await self.manager.syncActive()
                     // Close to the limit: check the active account every sync so the switch is quick.
                     if let id = await self.manager.activeID, self.policy.needsCloseWatch(self.records.first { $0.id == id }) {
                         await self.manager.refresh(id: id)
+                    }
+                    if Date().timeIntervalSince(lastActive) >= Self.activeInterval, let id = await self.manager.activeID {
+                        await self.manager.refresh(id: id)
+                        lastActive = Date()
                     }
                     // The main account's limit should have reset: check it so we go back promptly.
                     let main = self.records.first { $0.id == self.mainID }
@@ -107,6 +117,9 @@ final class AppModel: ObservableObject {
         defer { switchingID = nil }
         do {
             try await manager.switchTo(id)
+            lastSwitchAt = Date()
+            Diag.log("switched to \(records.first { $0.id == id }?.title ?? id)")
+            verifySwitch(id)
             await manager.refresh(id: id)
             await pull()
             let name = active?.title ?? "the account"
@@ -118,6 +131,41 @@ final class AppModel: ObservableObject {
             message = error.localizedDescription
         }
         checkLimit()
+    }
+
+    private var sessionScan: (at: Date, found: Bool) = (.distantPast, false)
+    private var lastLogged: [String: Date] = [:]
+
+    /// True when a session stopped at a limit since the last switch. Scanned at most once a minute.
+    private func sessionReportsLimit() -> Bool {
+        if Date().timeIntervalSince(sessionScan.at) < 60 { return sessionScan.found }
+        let since = max(lastSwitchAt, Date().addingTimeInterval(-30 * 60))
+        sessionScan = (Date(), !SessionResume.stoppedAtLimit(since: since, live: []).isEmpty)
+        return sessionScan.found
+    }
+
+    /// Diagnostics line, at most once per 10 minutes per message.
+    private func logOnce(_ line: String) {
+        if let t = lastLogged[line], Date().timeIntervalSince(t) < 600 { return }
+        lastLogged[line] = Date()
+        Diag.log(line)
+    }
+
+    /// A running session can write its old login back to the keychain right after a switch (it renews
+    /// its token from memory). Check twice; if the switch was undone, apply it once more.
+    private func verifySwitch(_ id: String) {
+        Task {
+            for (n, wait) in [20, 60].enumerated() {
+                try? await Task.sleep(for: .seconds(wait))
+                _ = try? await manager.syncActive()
+                await pull()
+                guard activeID != id, lastSwitchAt.timeIntervalSinceNow > -180 else { continue }
+                Diag.log("switch to \(id) was undone (keychain holds \(activeID ?? "nothing")); applying again")
+                guard n == 0, switchingID == nil else { return }
+                try? await manager.switchTo(id)
+                await pull()
+            }
+        }
     }
 
     func setMain(_ id: String?) {
@@ -209,20 +257,28 @@ final class AppModel: ObservableObject {
     private func checkLimit() {
         guard let a = active else { return }
         trackSessions(a)
-        if a.usage?.isLimited != true { notifiedLimit.remove(a.id) }
+        // A session that got "You've hit your … limit" is proof even when the usage numbers are stale
+        // (for example the active login was expired and could not be queried).
+        let reported = a.usage?.isLimited != true && sessionReportsLimit()
+        if a.usage?.isLimited != true, !reported { notifiedLimit.remove(a.id) }
+        if reported { logOnce("\(a.title): a session reports the limit while usage shows \(a.usage.map { "\(Int($0.pressure))%" } ?? "unknown")") }
         Task {
             if autoSwitch, switchingID == nil,
-               let target = policy.target(active: a, accounts: records, mainID: mainID, lastSwitch: lastAutoSwitch, now: Date()) {
+               let target = policy.target(active: a, accounts: records, mainID: mainID, lastSwitch: lastAutoSwitch, now: Date(), assumeLimited: reported) {
                 lastAutoSwitch = Date()
+                Diag.log("auto switch \(a.title) -> \(target.title) (limited: \(a.usage?.isLimited == true), reported: \(reported))")
                 await switchTo(target.id)
                 if activeID == target.id {
-                    let why = a.usage?.isLimited == true ? "\(a.title) hit its limit" : "\(target.title) is your main account and has usage again"
+                    let why = a.usage?.isLimited == true || reported ? "\(a.title) hit its limit" : "\(target.title) is your main account and has usage again"
                     message = "\(why); switched to \(target.title)."
                     if notifyAtLimit { Notifier.switched(from: a, to: target, reason: why, sessionsContinue: keepsSessionsGoing) }
                     return
                 }
             }
-            guard a.usage?.isLimited == true, notifyAtLimit, !notifiedLimit.contains(a.id) else { return }
+            if a.usage?.isLimited == true || reported, autoSwitch, switchingID == nil {
+                logOnce("\(a.title) is limited, no switch: " + (lastAutoSwitch.map { Date().timeIntervalSince($0) < policy.cooldown ? "cooldown" : "no account with room" } ?? "no account with room"))
+            }
+            guard a.usage?.isLimited == true || reported, notifyAtLimit, !notifiedLimit.contains(a.id) else { return }
             notifiedLimit.insert(a.id)
             Notifier.limitReached(account: a, alternative: await manager.bestAlternative(to: a.id))
         }

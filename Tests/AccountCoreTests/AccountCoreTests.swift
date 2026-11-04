@@ -450,3 +450,13 @@ private func entry(_ type: String, error: Bool = false, text: String = "hi", cwd
     let ok = record("A", five: 10)
     #expect(!policy.activeMayBeBack(ok, now: after) && policy.nextDelay(active: ok, now: before) == 30)
 }
+
+@Test func reportedLimitSwitchesEvenWhenUsageLooksFine() {
+    let a = record("A", five: 40), b = record("B", five: 10)                     // A's numbers are stale
+    #expect(policy.target(active: a, accounts: [a, b], mainID: nil, lastSwitch: nil, now: fixedNow) == nil)
+    #expect(policy.target(active: a, accounts: [a, b], mainID: nil, lastSwitch: nil, now: fixedNow, assumeLimited: true)?.id == "B")
+    // Still honours the cooldown and never picks a limited account.
+    #expect(policy.target(active: a, accounts: [a, b], mainID: nil, lastSwitch: fixedNow, now: fixedNow, assumeLimited: true) == nil)
+    let full = record("B", five: 100)
+    #expect(policy.target(active: a, accounts: [a, full], mainID: nil, lastSwitch: nil, now: fixedNow, assumeLimited: true) == nil)
+}

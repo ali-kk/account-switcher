@@ -19,6 +19,13 @@ public struct SecurityCLISecretStore: SecretStore {
     /// `security -i` refuses longer stdin lines; above this the value goes in argv (as Claude Code does).
     static let stdinLineLimit = 4000
     let tool = "/usr/bin/security"
+    static let timeout: TimeInterval = 15
+
+    private final class TimedOut: @unchecked Sendable {
+        private let lock = NSLock(); private var flag = false
+        func set() { lock.lock(); flag = true; lock.unlock() }
+        var value: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+    }
 
     public init() {}
 
@@ -77,11 +84,19 @@ public struct SecurityCLISecretStore: SecretStore {
         let inPipe = Pipe()
         p.standardInput = inPipe
         try p.run()
+        // A locked keychain or an unanswered prompt can make `security` wait forever, which would freeze
+        // the whole account manager: kill it after a while so the call fails and the next sync retries.
+        let timedOut = TimedOut()
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.timeout) { if p.isRunning { timedOut.set(); p.terminate() } }
         if let stdin { inPipe.fileHandleForWriting.write(Data(stdin.utf8)) }
         try? inPipe.fileHandleForWriting.close()
         let o = out.fileHandleForReading.readDataToEndOfFile()
         let e = err.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
+        if timedOut.value {
+            Diag.log("security \(args.first ?? "") timed out after \(Int(Self.timeout)) s (keychain locked or prompt open?)")
+            return (-1, Data(), "timed out")
+        }
         return (p.terminationStatus, o, String(decoding: e, as: UTF8.self))
     }
 }
